@@ -214,11 +214,11 @@ app.post('/api/timer/start', (req, res) => {
 
   runSQL('INSERT INTO time_entries (project_id, start_time) VALUES (?, ?)', [project_id, now]);
   saveDB();
-  const id = lastInsertId();
   const entry = queryOne(
     `SELECT te.*, p.name as project_name, p.client as client_name, p.rate as rate
-     FROM time_entries te JOIN projects p ON te.project_id = p.id WHERE te.id = ?`,
-    [id]
+     FROM time_entries te JOIN projects p ON te.project_id = p.id 
+     WHERE te.end_time IS NULL 
+     ORDER BY te.id DESC LIMIT 1`
   );
   res.status(201).json(entry);
 });
