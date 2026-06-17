@@ -287,8 +287,7 @@ app.delete('/api/time-entries/:id', (req, res) => {
 });
 
 // ---------- Weekly report ----------
-app.get('/api/reports/weekly', (req, res) => {
-  const base = req.query.date ? new Date(String(req.query.date)) : new Date();
+function buildWeeklyReport(base: Date) {
   const { start, end } = getWeekRange(base);
 
   const entries = queryAll(
@@ -369,60 +368,143 @@ app.get('/api/reports/weekly', (req, res) => {
     }
   }
 
-  res.json({
+  const byClient = new Map<
+    string,
+    {
+      client_name: string;
+      projects: Array<{ project_id: number; project_name: string; rate: number; hours: number; amount: number; entries: typeof entries }>;
+      total_hours: number;
+      total_amount: number;
+    }
+  >();
+
+  for (const p of projects) {
+    if (!byClient.has(p.client_name)) {
+      byClient.set(p.client_name, {
+        client_name: p.client_name,
+        projects: [],
+        total_hours: 0,
+        total_amount: 0
+      });
+    }
+    const c = byClient.get(p.client_name)!;
+    c.projects.push({
+      project_id: p.project_id,
+      project_name: p.project_name,
+      rate: p.rate,
+      hours: p.total_hours,
+      amount: p.total_amount,
+      entries: p.entries
+    });
+    c.total_hours += p.total_hours;
+    c.total_amount += p.total_amount;
+  }
+  const clients = Array.from(byClient.values());
+
+  return {
     week_start: start.toISOString(),
     week_end: end.toISOString(),
+    week_start_key: dateKey(start),
+    week_end_key: dateKey(end),
     days,
     day_labels: ['周一', '周二', '周三', '周四', '周五', '周六', '周日'],
     projects,
+    clients,
     daily_totals: dailyTotals,
     grand_total: {
       hours: Math.round(grandTotal.hours * 100) / 100,
       amount: Math.round(grandTotal.amount * 100) / 100
-    }
+    },
+    raw_entries: entries
+  };
+}
+
+app.get('/api/reports/weekly', (req, res) => {
+  const base = req.query.date ? new Date(String(req.query.date)) : new Date();
+  const report = buildWeeklyReport(base);
+  const { raw_entries: _r, ...rest } = report;
+  res.json(rest);
+});
+
+app.get('/api/reports/weekly/clients', (req, res) => {
+  const base = req.query.date ? new Date(String(req.query.date)) : new Date();
+  const report = buildWeeklyReport(base);
+  res.json({
+    week_start: report.week_start,
+    week_end: report.week_end,
+    week_start_key: report.week_start_key,
+    week_end_key: report.week_end_key,
+    clients: report.clients.map((c) => ({
+      client_name: c.client_name,
+      total_hours: Math.round(c.total_hours * 100) / 100,
+      total_amount: Math.round(c.total_amount * 100) / 100,
+      projects: c.projects.map((p) => ({
+        project_id: p.project_id,
+        project_name: p.project_name,
+        rate: p.rate,
+        hours: Math.round(p.hours * 100) / 100,
+        amount: Math.round(p.amount * 100) / 100,
+        daily_entries: p.entries.map((e) => ({
+          date: dateKey(new Date(e.start_time)),
+          start_time: e.start_time,
+          end_time: e.end_time,
+          hours: e.hours
+        }))
+      }))
+    })),
+    grand_total: report.grand_total
   });
 });
 
 // ---------- CSV export ----------
 app.get('/api/reports/weekly/csv', (req, res) => {
   const base = req.query.date ? new Date(String(req.query.date)) : new Date();
-  const { start, end } = getWeekRange(base);
+  const format = (req.query.format as string) || 'detail';
+  const report = buildWeeklyReport(base);
+  const filename = `weekly-${format}-${report.week_start_key}_${report.week_end_key}.csv`;
+  let header: string[] = [];
+  let rows: string[][] = [];
 
-  const entries = queryAll(
-    `SELECT te.start_time, te.end_time, te.hours, p.name as project_name, p.client as client_name, p.rate as rate
-     FROM time_entries te JOIN projects p ON te.project_id = p.id
-     WHERE te.start_time >= ? AND te.start_time <= ? AND te.end_time IS NOT NULL
-     ORDER BY te.start_time ASC`,
-    [start.toISOString(), end.toISOString()]
-  ) as Array<{
-    start_time: string;
-    end_time: string;
-    hours: number;
-    project_name: string;
-    client_name: string;
-    rate: number;
-  }>;
-
-  const header = ['日期', '开始时间', '结束时间', '项目', '客户', '工时(h)', '费率', '金额'];
-  const rows = entries.map((e) => {
-    const s = new Date(e.start_time);
-    const en = new Date(e.end_time);
-    const date = s.toISOString().slice(0, 10);
-    const st = s.toTimeString().slice(0, 5);
-    const et = en.toTimeString().slice(0, 5);
-    const amount = (e.hours * e.rate).toFixed(2);
-    return [date, st, et, e.project_name, e.client_name, e.hours.toFixed(2), e.rate.toFixed(2), amount];
-  });
-
-  const totalHours = entries.reduce((s, e) => s + (e.hours || 0), 0);
-  const totalAmount = entries.reduce((s, e) => s + (e.hours || 0) * e.rate, 0);
-  rows.push(['合计', '', '', '', '', totalHours.toFixed(2), '', totalAmount.toFixed(2)]);
+  if (format === 'client') {
+    header = ['客户', '项目', '费率', '工时(h)', '金额'];
+    let totalHours = 0;
+    let totalAmount = 0;
+    for (const c of report.clients) {
+      for (const p of c.projects) {
+        rows.push([c.client_name, p.project_name, `¥${p.rate.toFixed(2)}`, p.hours.toFixed(2), `¥${p.amount.toFixed(2)}`]);
+        totalHours += p.hours;
+        totalAmount += p.amount;
+      }
+      rows.push([`▶ ${c.client_name} 小计`, '', '', c.total_hours.toFixed(2), `¥${c.total_amount.toFixed(2)}`]);
+      rows.push(['', '', '', '', '']);
+    }
+    rows.push(['合计', '', '', totalHours.toFixed(2), `¥${totalAmount.toFixed(2)}`]);
+  } else {
+    header = ['日期', '开始时间', '结束时间', '项目', '客户', '工时(h)', '费率(¥/h)', '金额(¥)'];
+    const entries = report.raw_entries;
+    for (const e of entries) {
+      const s = new Date(e.start_time);
+      const en = new Date(e.end_time!);
+      const date = s.toISOString().slice(0, 10);
+      const st = s.toTimeString().slice(0, 5);
+      const et = en.toTimeString().slice(0, 5);
+      const h = (e.hours || 0).toFixed(2);
+      const amount = ((e.hours || 0) * e.rate).toFixed(2);
+      rows.push([date, st, et, e.project_name, e.client_name, h, e.rate.toFixed(2), amount]);
+    }
+    rows.push([
+      '合计', '', '', '', '',
+      report.grand_total.hours.toFixed(2),
+      '',
+      report.grand_total.amount.toFixed(2)
+    ]);
+  }
 
   const csv = [header, ...rows].map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
   const bom = '\uFEFF';
 
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', `attachment; filename="weekly-report-${dateKey(start)}.csv"`);
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.send(bom + csv);
 });
 

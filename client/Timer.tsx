@@ -69,8 +69,9 @@ export default function Timer({ projects, activeTimer, onRefresh }: TimerProps) 
     ? projects.find((p) => p.id === activeTimer.project_id)
     : null;
 
-  async function handleStart() {
-    if (!selectedProjectId) {
+  async function handleStart(targetId?: number) {
+    const pid = targetId ?? (typeof selectedProjectId === 'number' ? selectedProjectId : NaN);
+    if (!pid || isNaN(pid)) {
       setError('请先选择一个项目');
       return;
     }
@@ -80,14 +81,26 @@ export default function Timer({ projects, activeTimer, onRefresh }: TimerProps) 
       const res = await fetch('/api/timer/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_id: selectedProjectId })
+        body: JSON.stringify({ project_id: pid })
       });
       if (!res.ok) throw new Error((await res.json()).error || '启动失败');
+      setSelectedProjectId(pid);
       onRefresh();
     } catch (e: any) {
       setError(e.message);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleProjectChange(value: number | '') {
+    if (value === '') {
+      setSelectedProjectId('');
+      return;
+    }
+    setSelectedProjectId(value);
+    if (isRunning) {
+      await handleStart(value);
     }
   }
 
@@ -161,16 +174,15 @@ export default function Timer({ projects, activeTimer, onRefresh }: TimerProps) 
         <label style={{ display: 'block', fontSize: 13, color: '#6b7280', marginBottom: 6 }}>选择项目</label>
         <select
           value={selectedProjectId}
-          onChange={(e) => setSelectedProjectId(e.target.value ? Number(e.target.value) : '')}
-          disabled={isRunning}
+          onChange={(e) => handleProjectChange(e.target.value ? Number(e.target.value) : '')}
           style={{
             width: '100%',
             padding: '10px 12px',
             border: '1px solid #d1d5db',
             borderRadius: 8,
             fontSize: 14,
-            background: isRunning ? '#f3f4f6' : '#fff',
-            cursor: isRunning ? 'not-allowed' : 'pointer'
+            background: '#fff',
+            cursor: 'pointer'
           }}
         >
           <option value="">-- 请选择项目 --</option>
@@ -182,9 +194,9 @@ export default function Timer({ projects, activeTimer, onRefresh }: TimerProps) 
         </select>
         {isRunning && (
           <div style={{ fontSize: 12, color: '#ea580c', marginTop: 4 }}>
-            计时中，切换项目会自动停止当前计时并在新项目开始
-          </div>
-        )}
+          计时中切换会自动保存当前，切换到新项目继续
+        </div>
+      )}
       </div>
 
       <div style={{
